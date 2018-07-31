@@ -1,0 +1,5 @@
+FROM jetbrains/teamcity-server:latest-nanoserver
+
+COPY ./my_run.ps1 c:/teamcity
+
+CMD powershell c:\teamcity\my_run.ps1
