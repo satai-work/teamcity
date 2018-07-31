@@ -1,0 +1,127 @@
+ARG DOTNETVER=4.7.2 
+
+FROM jetbrains/teamcity-agent:latest-nanoserver AS agent
+FROM microsoft/dotnet-framework:$DOTNETVER-runtime
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# Install Git
+RUN [Net.ServicePointManager]::SecurityProtocol = 'tls12, tls11, tls' ; \
+    Invoke-WebRequest https://github.com/git-for-windows/git/releases/download/v2.18.0.windows.1/MinGit-2.18.0-64-bit.zip -OutFile git.zip; \
+    Expand-Archive git.zip -DestinationPath $Env:ProgramFiles\Git ; \
+    Remove-Item -Force git.zip ; \
+    setx /M PATH $(${Env:PATH} + \";${Env:ProgramFiles}\Git\cmd\")
+
+# Install Open JDK
+RUN [Net.ServicePointManager]::SecurityProtocol = 'tls12, tls11, tls' ; \
+    Invoke-WebRequest https://github.com/ojdkbuild/ojdkbuild/releases/download/1.8.0.161-1/java-1.8.0-openjdk-1.8.0.161-1.b14.ojdkbuild.windows.x86_64.zip -OutFile openjdk.zip; \
+    Expand-Archive openjdk.zip -DestinationPath $Env:ProgramFiles\Java; \
+    Get-ChildItem -Path $Env:ProgramFiles\Java -Filter "java-*-openjdk*" | ForEach-Object {$_ | Rename-Item -NewName "OpenJDK" }; \
+    Remove-Item -Force $Env:ProgramFiles\Java\OpenJDK\src.zip; \
+    Remove-Item -Force openjdk.zip
+
+ENV NUGET_VERSION 4.4.1
+RUN New-Item -Type Directory $Env:ProgramFiles\NuGet -ErrorAction SilentlyContinue ; \
+    Invoke-WebRequest -UseBasicParsing https://dist.nuget.org/win-x86-commandline/v${Env:NUGET_VERSION}/nuget.exe -OutFile $Env:ProgramFiles\NuGet\nuget.exe
+ 
+# Install VS Test Agent
+RUN Invoke-WebRequest -UseBasicParsing https://download.visualstudio.microsoft.com/download/pr/12210068/8a386d27295953ee79281fd1f1832e2d/vs_TestAgent.exe -OutFile vs_TestAgent.exe; \
+    Start-Process vs_TestAgent.exe -ArgumentList '--quiet', '--norestart', '--nocache' -NoNewWindow -Wait; \
+    Remove-Item -Force vs_TestAgent.exe; \
+
+# Install VS Build Tools
+    Invoke-WebRequest -UseBasicParsing https://download.visualstudio.microsoft.com/download/pr/12210059/e64d79b40219aea618ce2fe10ebd5f0d/vs_BuildTools.exe -OutFile vs_BuildTools.exe; \
+    # Installer won't detect DOTNET_SKIP_FIRST_TIME_EXPERIENCE if ENV is used, must use setx /M
+    setx /M DOTNET_SKIP_FIRST_TIME_EXPERIENCE 1; \
+    Start-Process vs_BuildTools.exe -ArgumentList '--add', 'Microsoft.VisualStudio.Workload.MSBuildTools', '--add', 'Microsoft.VisualStudio.Workload.NetCoreBuildTools', '--quiet', '--norestart', '--nocache' -NoNewWindow -Wait; \
+    Remove-Item -Force vs_buildtools.exe; \
+    Remove-Item -Force -Recurse \"${Env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\"; \
+    Remove-Item -Force -Recurse ${Env:TEMP}\*; \
+    Remove-Item -Force -Recurse \"${Env:ProgramData}\Package Cache\"
+
+ENV ROSLYN_COMPILER_LOCATION "C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\Roslyn"
+
+# ngen assemblies queued by VS installers - must be done in cmd shell to avoid access issues
+SHELL ["cmd", "/S", "/C"]
+RUN \Windows\Microsoft.NET\Framework64\v4.0.30319\ngen update \
+    # Workaround VS installer/ngen issue with VSWebLauncher
+    && \Windows\Microsoft.NET\Framework\v4.0.30319\ngen uninstall "C:\Program Files (x86)\Microsoft Visual Studio\2017\TestAgent\Common7\IDE\VSWebLauncher.exe" \
+    && \Windows\Microsoft.NET\Framework\v4.0.30319\ngen update
+
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+# Set PATH in one layer to keep image size down.
+RUN setx /M PATH $(${Env:PATH} \
+    + \";${Env:ProgramFiles}\NuGet\" \
+    + \";${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2017\TestAgent\Common7\IDE\CommonExtensions\Microsoft\TestWindow\" \
+    + \";${Env:ProgramFiles(x86)}\Microsoft Visual Studio\2017\BuildTools\MSBuild\15.0\Bin\" \
+    + \";${Env:ProgramFiles}\dotnet\")
+
+# Install Targeting Packs
+RUN @('4.0', '4.5.2', '4.6.2', '4.7.2') \
+    | %{ \
+        Invoke-WebRequest -UseBasicParsing https://dotnetbinaries.blob.core.windows.net/referenceassemblies/v${_}.zip -OutFile referenceassemblies.zip; \
+        Expand-Archive referenceassemblies.zip -DestinationPath \"${Env:ProgramFiles(x86)}\Reference Assemblies\Microsoft\Framework\.NETFramework\"; \
+        Remove-Item -Force referenceassemblies.zip; \
+    }
+
+COPY --from=agent ["C:/Program Files/Java/Oracle", "C:/Program Files/Java/Oracle"]
+COPY --from=agent /BuildAgent /BuildAgent
+
+EXPOSE 9090
+VOLUME C:/BuildAgent/conf
+
+CMD powershell C:/BuildAgent/run-agent.ps1
+
+ENV CONFIG_FILE="C:/BuildAgent/conf/buildAgent.properties" \
+    # Java home directory
+    JRE_HOME="C:\Program Files\Java\Oracle\jre" \
+    # Opt out of the telemetry feature
+    DOTNET_CLI_TELEMETRY_OPTOUT=true \
+    # Disable first time experience
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=true \
+    # Configure Kestrel web server to bind to port 80 when present
+    ASPNETCORE_URLS=http://+:80 \
+    # Enable detection of running in a container
+    DOTNET_RUNNING_IN_CONTAINER=true \
+    # Enable correct mode for dotnet watch (only mode supported in a container)
+    DOTNET_USE_POLLING_FILE_WATCHER=true \
+    # Skip extraction of XML docs - generally not useful within an image/container - helps perfomance
+    NUGET_XMLDOC_MODE=skip
+
+RUN dotnet.exe help
+
+ENV NODE_VERSION 8.11.3
+RUN Invoke-WebRequest $('https://nodejs.org/dist/v{0}/node-v{0}-win-x64.zip' -f $env:NODE_VERSION) -UseBasicParsing -OutFile nodejs.zip ; \
+    Expand-Archive nodejs.zip -DestinationPath C:\ ; \
+    Rename-Item -Path $('C:\node-v{0}-win-x64' -f $env:NODE_VERSION) -NewName 'C:\nodejs' ; \
+    Remove-Item -Force nodejs.zip ; \
+    setx /M PATH $(\"C:\nodejs;\"+${Env:PATH})
+
+COPY ./SF/ /
+
+RUN New-Item $('{0}\Microsoft Service Fabric' -f $env:ProgramFiles) -type directory ; \
+    Expand-Archive 'Microsoft Service Fabric.zip' -DestinationPath $env:ProgramFiles
+
+RUN $assemblies = @('C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\System.Fabric.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Policy.1.0.System.Fabric.dll', \
+        'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Policy.2.0.System.Fabric.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Policy.3.0.System.Fabric.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Policy.4.0.System.Fabric.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Policy.5.0.System.Fabric.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\System.Fabric.Strings.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\System.Fabric.Dca.Validator.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\DcaStandardPluginValidator.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\System.Fabric.dSTSClient.dll', \
+	'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code\Microsoft.ServiceFabric.Data.Interfaces.dll'); \
+    Add-Type -AssemblyName System.EnterpriseServices; \
+    $publish = New-Object System.EnterpriseServices.Internal.Publish; \
+    $assemblies | % {$publish.GacInstall($_)} 
+
+RUN Copy-Item 'C:\Program Files\Microsoft Service Fabric\bin\ServiceFabric' 'C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules\' -Recurse ; \
+    reg import SF.reg ; \
+    $env:PATH = 'C:\Program Files\Microsoft Service Fabric\bin\Fabric\Fabric.Code;' + $env:PATH ; \
+    [Environment]::SetEnvironmentVariable('PATH', $env:PATH, [EnvironmentVariableTarget]::Machine)
+
+RUN Invoke-WebRequest 'https://download.microsoft.com/download/5/5/5/555B653A-4893-4FBD-A256-3CFC555D626E/MicrosoftServiceFabricSDK.3.2.162.msi' -UseBasicParsing -OutFile SF_SDK.msi ; \
+    Start-Process "msiexec.exe" -ArgumentList '/i', 'C:\SF_SDK.msi', '/passive', '/quiet', '/norestart', '/l* c:\fabricsdkinstall.log', 'STARTUPTYPE=disabled', 'IACCEPTEULA=yes', '/qn' -NoNewWindow -Wait ; \
+    rm "C:\SF_SDK.msi"
