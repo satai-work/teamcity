@@ -4,7 +4,7 @@ Teamcity Server &amp; Agents in win-docker (with servicefabric runtime & sdk)
 Server is private (cause now i want not spend time to make login/password secure :( ), but u can create it from dockerfile.
 Agent public repo https://hub.docker.com/u/mortal/, that able to publish to ServiceFabric. U can create it too, or download.
 
-But we have workaround, thx to https://github.com/LiamLeane, even we have official answer that "Installation of SF inside windows containers is not supported as they do not allow installation of kernel drivers."
+But we have workaround, thx to [LiamLeane](https://github.com/LiamLeane), even we have official answer that "Installation of SF inside windows containers is not supported as they do not allow installation of kernel drivers."
 
 Added components to agent:
 * .NET Framework 4.7.2
@@ -20,4 +20,4 @@ Added components to agent:
   * https://github.com/Azure/service-fabric-issues/issues/637</br>
   * https://github.com/Azure/service-fabric-issues/issues/741
 
-p.s. Thx to https://github.com/LiamLeane
+
